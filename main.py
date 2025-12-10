@@ -450,7 +450,14 @@ class GalaxyPlotWidget(pg.PlotWidget):
             player = self.scrub_pool[self.pool_index]
             self.pool_index = (self.pool_index + 1) % self.pool_size
             
-            # 既存の再生を止めずに、上書き再生 (前の音が残るわけではないが、別のPlayerが担当するので前の音は消えない)
+            # 1. 既存の（他の）な鳴っているプレイヤーを 0.3秒後に停止予約
+            #    (次の音が鳴ってから 0.3秒後に前の音を消す = クロスフェード的な挙動)
+            for p in self.scrub_pool:
+                if p is not player and p.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+                    # lambdaでキャプチャするpを固定
+                    QTimer.singleShot(300, p.stop)
+
+            # 2. 新しいプレイヤーの再生準備
             if player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
                  player.stop()
                  
@@ -522,8 +529,7 @@ class GalaxyPlotWidget(pg.PlotWidget):
                     self.update_history(data_pos)
                     target_item = next((item for item in self.visible_points_data if item['path'] == file_path), None)
                     if target_item:
-                        # ヒット中はタイマーを止める（再生維持）
-                        self.scrub_stop_timer.stop()
+                        # 右クリック開始時はポリフォニックで鳴らすか？ -> どちらでも良いが、スクラビングの一環ならTrue
                         self.play_audio(file_path, target_item.get('start_time', 0), polyphonic=True)
             except Exception as e:
                 print(f"Right click error: {e}")
@@ -546,8 +552,7 @@ class GalaxyPlotWidget(pg.PlotWidget):
                 result = self.find_nearest_point(scene_pos, threshold=30) 
                 
                 if result:
-                    # エリア内: タイマー停止（安全地帯）
-                    self.scrub_stop_timer.stop()
+                    # エリア内
                     
                     file_path, data_pos, _ = result
                     
@@ -560,10 +565,8 @@ class GalaxyPlotWidget(pg.PlotWidget):
                         if target_item:
                             self.play_audio(file_path, target_item.get('start_time', 0), polyphonic=True)
                 else:
-                    # エリア外: カウントダウン開始
-                    # まだ停止タイマーが動いていなければ開始（動き続けている限りタイマーをリセットしない＝出た瞬間から0.4秒）
-                    if not self.scrub_stop_timer.isActive():
-                        self.scrub_stop_timer.start(400) # 0.4s
+                    # エリア外: 何もしない (音は鳴り続ける -> 次の音が鳴るまで、あるいは右クリック離すまで)
+                    pass
                         
             except Exception as e:
                 print(f"Scrubbing error: {e}")
