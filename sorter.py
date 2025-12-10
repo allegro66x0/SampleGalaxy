@@ -173,6 +173,7 @@ def main(input_file='raw_features.pkl', output_file='database.json', spread=5.0)
             "start_time": item["start_time"],
             "duration": item["duration"],
             "category": category,
+            "centroid": item["centroid_mean"] 
             # GUI側で特徴量を使わないなら保存不要、使うなら raw_features か X を保存
         })
         

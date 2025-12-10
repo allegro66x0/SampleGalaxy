@@ -1,15 +1,46 @@
 import sys
 import json
 import os
+import time
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QSlider, 
-                           QHBoxLayout, QLabel, QCheckBox, QScrollArea, QGroupBox, QPushButton)
-from PyQt6.QtCore import Qt, QUrl, QMimeData, QPoint, QPointF
+                           QHBoxLayout, QLabel, QCheckBox, QScrollArea, QGroupBox, QPushButton,
+                           QListWidget, QAbstractItemView, QListWidgetItem)
+from PyQt6.QtCore import Qt, QUrl, QMimeData, QPoint, QPointF, pyqtSignal, QTimer
 from PyQt6.QtGui import QDrag, QColor, QAction
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 import pyqtgraph as pg
 import numpy as np
 
+class FavoritesListWidget(QListWidget):
+    files_dropped = pyqtSignal(list)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setDragEnabled(False) # リストからのドラッグは今回は不要（並べ替えしないなら）
+        self.setDropIndicatorShown(True)
+        
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.accept()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.accept()
+        else:
+            event.ignore()
+            
+    def dropEvent(self, event):
+        if event.mimeData().hasUrls():
+            files = [u.toLocalFile() for u in event.mimeData().urls()]
+            self.files_dropped.emit(files)
+            event.accept()
+
 class GalaxyPlotWidget(pg.PlotWidget):
+    favorites_changed = pyqtSignal()
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setBackground('k')
@@ -60,7 +91,13 @@ class GalaxyPlotWidget(pg.PlotWidget):
         
         # フィルター設定
         self.filter_oneshot = False
+        self.filter_favorites_only = False # お気に入り専用レイヤー
         self.visible_categories = set() # 表示するカテゴリのセット (空なら全て表示、または初期化時に設定)
+        
+        # お気に入りデータ
+        self.favorites = set()
+        self.favorites_file = "favorites.json"
+        self.load_favorites()
         
         # 検索用キャッシュ (表示されている点のみ)
         self.visible_points_data = [] # 表示中のメタデータリスト
@@ -94,6 +131,25 @@ class GalaxyPlotWidget(pg.PlotWidget):
         self.player.setAudioOutput(self.audio_output)
         self.audio_output.setVolume(0.8)
         
+        # Polyphonic Scrubbing Pool (for Right-Click Drag)
+        self.scrub_pool = []
+        self.scrub_pool_outputs = []
+        self.pool_size = 8
+        self.pool_index = 0
+        
+        for _ in range(self.pool_size):
+            p = QMediaPlayer()
+            o = QAudioOutput()
+            p.setAudioOutput(o)
+            o.setVolume(0.8)
+            self.scrub_pool.append(p)
+            self.scrub_pool_outputs.append(o)
+            
+        # スクラビング停止用タイマー (Watchdog)
+        self.scrub_stop_timer = QTimer(self)
+        self.scrub_stop_timer.setSingleShot(True)
+        self.scrub_stop_timer.timeout.connect(self.stop_all_scrubbing)
+        
         # クリックイベントの接続 (Scene全体)
         # 散布図アイテムのクリック(sigClicked)は範囲が狭いため、
         # Sceneのクリックイベントを拾って最近傍探索を行う (Smart Click)
@@ -104,10 +160,64 @@ class GalaxyPlotWidget(pg.PlotWidget):
         self.drag_start_pos = None
         self.current_hovered_point = None
         self.last_played_path = None # スクラビング再生の重複防止用
+        self.last_play_time = 0 # スクラビング再生の間引き用 (0.1秒間隔)
         
         # キー入力のためのフォーカス設定
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
+    def load_favorites(self):
+        if os.path.exists(self.favorites_file):
+            try:
+                with open(self.favorites_file, 'r', encoding='utf-8') as f:
+                    self.favorites = set(json.load(f))
+            except Exception as e:
+                print(f"Failed to load favorites: {e}")
+                self.favorites = set()
+
+    def save_favorites(self):
+        try:
+            with open(self.favorites_file, 'w', encoding='utf-8') as f:
+                json.dump(list(self.favorites), f, indent=4)
+        except Exception as e:
+            print(f"Failed to save favorites: {e}")
+
+    def add_favorite(self, path):
+        if path not in self.favorites:
+            self.favorites.add(path)
+            print(f"Added to favorites: {path}")
+            self.save_favorites()
+            self.update_plot()
+            self.favorites_changed.emit()
+
+    def remove_favorite(self, path):
+        if path in self.favorites:
+            self.favorites.remove(path)
+            print(f"Removed from favorites: {path}")
+            self.save_favorites()
+            self.update_plot()
+            self.favorites_changed.emit()
+
+    def stop_all_scrubbing(self):
+        # スクラビング用のプレイヤーを全て停止
+        # print("Stopping all scrubbing players (Timeout)")
+        for p in self.scrub_pool:
+            if p.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+                p.stop()
+
+    def toggle_favorite(self):
+        if not self.last_played_path:
+            return
+            
+        path = self.last_played_path
+        if path in self.favorites:
+            self.remove_favorite(path)
+        else:
+            self.add_favorite(path)
+            
+    def set_filter_favorites(self, enabled):
+        self.filter_favorites_only = enabled
+        self.update_plot()
+            
     def load_data(self, json_path):
         if not os.path.exists(json_path):
             print(f"データベースが見つかりません: {json_path}")
@@ -121,6 +231,20 @@ class GalaxyPlotWidget(pg.PlotWidget):
         # 全データの座標配列 (Jump機能などで使用)
         self.coords_array = np.array([[item['x'], item['y']] for item in data])
         
+        # Centroidの範囲を計算 (グラデーション用)
+        centroids = [item.get('centroid', 0) for item in data if 'centroid' in item]
+        if centroids:
+            self.min_centroid = min(centroids)
+            self.max_centroid = max(centroids)
+        else:
+            self.min_centroid = 0
+            self.max_centroid = 1
+            
+        # 外れ値の影響を抑えるために、少し範囲を狭める（上下5%カットなどを簡易的にやる）
+        # ここでは簡易的に上下限をそのまま使う
+        if self.max_centroid == self.min_centroid:
+            self.max_centroid += 1
+
         self.update_plot()
         
     def update_plot(self):
@@ -145,6 +269,13 @@ class GalaxyPlotWidget(pg.PlotWidget):
         })
         
         for item in self.points_data:
+            path = item['path']
+            is_fav = path in self.favorites
+            
+            # 0. お気に入りフィルター (AND検索ロジック)
+            if self.filter_favorites_only and not is_fav:
+                continue
+
             # 1. ワンショットフィルター適用
             if self.filter_oneshot:
                 duration = item.get('duration', 0.0)
@@ -160,22 +291,49 @@ class GalaxyPlotWidget(pg.PlotWidget):
                 else: 
                      continue # 表示OFF
 
-            # 色の決定
-            if category in colors:
-                color = colors[category]
+            # 色とサイズの決定
+            color = (150, 150, 150) # default
+            size = 4
+            symbol = 'o'
+            
+            if is_fav:
+                # お気に入りは金色で強調
+                if self.filter_favorites_only:
+                     # フィルター中は元の色を使うか？いや、やはり金色で統一感がいいか。
+                     # カテゴリ色も見たい場合は、枠線を金にする手もあるが、PyQtGraphのScatterはシンプルに
+                     color = (255, 215, 0) # Gold
+                else:
+                     color = (255, 215, 0) # Gold
+                size = 7 # 少し大きく
+                symbol = 'star' # 星形 (pyqtgraphでサポートされている場合)
             else:
-                cluster_id = item.get('cluster', 0)
-                color = cluster_palette[cluster_id % len(cluster_palette)]
+                if category == "LOOP" and 'centroid' in item:
+                    # グラデーション計算
+                    # 緑(0, 80, 0) -> 黄緑(180, 255, 50)
+                    val = item['centroid']
+                    norm = (val - self.min_centroid) / (self.max_centroid - self.min_centroid)
+                    norm = max(0.0, min(1.0, norm)) # Clamp
+                    
+                    # Dark Green (Low) -> Bright Yellow-Green (High)
+                    r = int(0 + norm * 180)
+                    g = int(80 + norm * 175)
+                    b = int(0 + norm * 50)
+                    color = (r, g, b)
+                    
+                elif category in colors:
+                    color = colors[category]
+                else:
+                    cluster_id = item.get('cluster', 0)
+                    color = cluster_palette[cluster_id % len(cluster_palette)]
             
             # ユーザー要望: 不透明にする、サイズを小さくする
-            size = 4
             alpha = 255
             
             spots.append({
                 'pos': (item['x'], item['y']),
                 'data': item['path'],
                 'brush': pg.mkBrush(*color, alpha),
-                'symbol': 'o',
+                'symbol': symbol,
                 'size': size
             })
             
@@ -284,17 +442,36 @@ class GalaxyPlotWidget(pg.PlotWidget):
             self.play_audio(target_item['path'], target_item.get('start_time', 0))
             print(f"Jumped to neighbor: {target_item['path']}")
 
-    def play_audio(self, file_path, start_time=0):
+    def play_audio(self, file_path, start_time=0, polyphonic=False):
         url = QUrl.fromLocalFile(os.path.abspath(file_path))
-        self.player.stop()
-        self.player.setSource(url)
         
-        start_ms = int(start_time * 1000)
-        if start_ms > 0:
-            self.player.setPosition(start_ms)
+        if polyphonic:
+            # Sound Poolからプレイヤーを選択 (Round Robin)
+            player = self.scrub_pool[self.pool_index]
+            self.pool_index = (self.pool_index + 1) % self.pool_size
             
-        self.player.play()
-        print(f"再生中: {file_path} (Start: {start_time:.2f}s)")
+            # 既存の再生を止めずに、上書き再生 (前の音が残るわけではないが、別のPlayerが担当するので前の音は消えない)
+            if player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+                 player.stop()
+                 
+            player.setSource(url)
+            start_ms = int(start_time * 1000)
+            if start_ms > 0:
+                player.setPosition(start_ms)
+            player.play()
+            
+        else:
+            # Main Player (Single Voice, UI連携)
+            self.player.stop()
+            self.player.setSource(url)
+            
+            start_ms = int(start_time * 1000)
+            if start_ms > 0:
+                self.player.setPosition(start_ms)
+                
+            self.player.play()
+            
+        print(f"再生中: {file_path} (Start: {start_time:.2f}s, Poly: {polyphonic})")
         
     def set_filter_oneshot(self, enabled):
         self.filter_oneshot = enabled
@@ -320,6 +497,8 @@ class GalaxyPlotWidget(pg.PlotWidget):
     def keyPressEvent(self, ev):
         if ev.key() == Qt.Key.Key_Space:
             self.jump_to_random_neighbor()
+        elif ev.key() == Qt.Key.Key_F:
+            self.toggle_favorite()
         else:
             super().keyPressEvent(ev)
 
@@ -343,12 +522,19 @@ class GalaxyPlotWidget(pg.PlotWidget):
                     self.update_history(data_pos)
                     target_item = next((item for item in self.visible_points_data if item['path'] == file_path), None)
                     if target_item:
-                        self.play_audio(file_path, target_item.get('start_time', 0))
+                        # 右クリック開始時はポリフォニックで鳴らすか？ -> どちらでも良いが、スクラビングの一環ならTrue
+                        self.play_audio(file_path, target_item.get('start_time', 0), polyphonic=True)
             except Exception as e:
                 print(f"Right click error: {e}")
             ev.accept()
             return
         super().mousePressEvent(ev)
+        
+    def mouseReleaseEvent(self, ev):
+        if ev.button() == Qt.MouseButton.RightButton:
+            # 右クリック離したら即停止 (あるいはタイマーに任せる？通常は離したら即停止が自然)
+            self.stop_all_scrubbing()
+        super().mouseReleaseEvent(ev)
 
     def mouseMoveEvent(self, ev):
         # 右ドラッグ（スクラビング再生）
@@ -362,12 +548,19 @@ class GalaxyPlotWidget(pg.PlotWidget):
                     
                     # 連続再生防止 (前回と同じなら再生しない)
                     if file_path != self.last_played_path:
+                        
+                        # スロットリング除去 -> ポリフォニック再生により「音が重なってもOK」＆「前の音を消さない」を実現
+                        
                         self.last_played_path = file_path
+                        # self.last_play_time = now # 不要
+                        
                         self.update_history(data_pos)
                         
                         target_item = next((item for item in self.visible_points_data if item['path'] == file_path), None)
                         if target_item:
-                            self.play_audio(file_path, target_item.get('start_time', 0))
+                            self.play_audio(file_path, target_item.get('start_time', 0), polyphonic=True)
+                            # Watchdogタイマーをリセット (150ms後に停止)
+                            self.scrub_stop_timer.start(150)
             except Exception as e:
                 print(f"Scrubbing error: {e}")
             return
@@ -437,9 +630,31 @@ class MainWindow(QMainWindow):
         self.one_shot_checkbox = QCheckBox("One-Shot (< 2s)")
         self.one_shot_checkbox.stateChanged.connect(self.on_oneshot_changed)
         disp_layout.addWidget(self.one_shot_checkbox)
+
+        # Favorites Filter
+        self.fav_checkbox = QCheckBox("Show Favorites Only (AND)")
+        self.fav_checkbox.stateChanged.connect(self.on_fav_filter_changed)
+        disp_layout.addWidget(self.fav_checkbox)
         
         disp_group.setLayout(disp_layout)
         self.sidebar_layout.addWidget(disp_group)
+        
+        # 1.5 Favorites List
+        fav_list_group = QGroupBox("Favorites List")
+        fav_list_layout = QVBoxLayout()
+        
+        self.fav_list_widget = FavoritesListWidget() # Custom Widget
+        # self.fav_list_widget.setDragEnabled(True) # 無効化済み
+        # self.fav_list_widget.setAcceptDrops(True) # クラス内で設定済み
+        # self.fav_list_widget.setDropIndicatorShown(True)
+        self.fav_list_widget.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.fav_list_widget.itemClicked.connect(self.on_fav_item_clicked)
+        # ドロップ信号の接続
+        self.fav_list_widget.files_dropped.connect(self.on_files_dropped)
+        
+        fav_list_layout.addWidget(self.fav_list_widget)
+        fav_list_group.setLayout(fav_list_layout)
+        self.sidebar_layout.addWidget(fav_list_group)
         
         # 2. カテゴリフィルターグループ (Scrollable if needed)
         cat_group = QGroupBox("Tags (Categories)")
@@ -526,6 +741,10 @@ class MainWindow(QMainWindow):
 
         # データをロード
         self.plot_widget.load_data("database.json")
+        
+        # お気に入り初期化
+        self.plot_widget.favorites_changed.connect(self.update_favorites_list)
+        self.update_favorites_list()
 
     def update_slider(self, position):
         if not self.is_slider_pressed:
@@ -548,6 +767,54 @@ class MainWindow(QMainWindow):
 
     def on_oneshot_changed(self):
         self.plot_widget.set_filter_oneshot(self.one_shot_checkbox.isChecked())
+
+    def on_fav_filter_changed(self):
+        self.plot_widget.set_filter_favorites(self.fav_checkbox.isChecked())
+        
+    def on_files_dropped(self, files):
+        for path in files:
+            # データベースにあるファイルかチェックしたほうが良いが、
+            # とりあえず登録してしまう (表示時にポイントがなければ単にリストにあるだけになる)
+            self.plot_widget.add_favorite(path)
+
+    def update_favorites_list(self):
+        self.fav_list_widget.clear()
+        for path in sorted(self.plot_widget.favorites):
+            name = os.path.basename(path)
+            
+            item = QListWidgetItem(self.fav_list_widget)
+            item.setToolTip(path)
+            item.setData(Qt.ItemDataRole.UserRole, path)
+            # item.setText(name) # カスタムウィジェットを使うのでテキストは不要だが、ソート等のためにあってもよい
+            
+            # カスタムウィジェット (Label + Remove Button)
+            widget = QWidget()
+            layout = QHBoxLayout()
+            layout.setContentsMargins(5, 2, 5, 2)
+            
+            label = QLabel(name)
+            # ラベルクリック透過させるのは難しいので、このウィジェット全体をリストアイテムとして扱う
+            
+            btn_remove = QPushButton("×")
+            btn_remove.setFixedSize(24, 24)
+            # lambdaでpathをキャプチャする際、変数が上書きされないようにデフォルト引数を使う
+            btn_remove.clicked.connect(lambda checked, p=path: self.plot_widget.remove_favorite(p))
+            
+            layout.addWidget(label)
+            layout.addStretch()
+            layout.addWidget(btn_remove)
+            widget.setLayout(layout)
+            
+            self.fav_list_widget.setItemWidget(item, widget)
+            
+    def on_fav_item_clicked(self, item):
+        path = item.data(Qt.ItemDataRole.UserRole)
+        # 該当するファイルの座標を探してジャンプ＆再生
+        target_item = next((d for d in self.plot_widget.points_data if d['path'] == path), None)
+        if target_item:
+            self.plot_widget.play_audio(path, target_item.get('start_time', 0))
+            # 座標を中心に移動できればベストだが、今回はとりあえず再生のみ
+            # 必要なら zoom を調整するコードなどを追加
         
     def on_category_changed(self, category, state):
         is_visible = (state == Qt.CheckState.Checked.value or state == 2) # 2 is Checked
