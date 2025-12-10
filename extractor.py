@@ -100,23 +100,29 @@ def main(root_dir, output_file='raw_features.pkl'):
     files = scan_directory(root_dir)
     print(f"検出されたファイル数: {len(files)}")
     
-    results = []
+    # 既存データに新規データをマージ
+    updated_count = 0
+    new_count = 0
     
     for i, f in enumerate(files):
-        # 差分更新: 既存データにあればそれを使う
+        # 既に存在する場合はスキップ (あるいは更新したい場合はここで処理)
         if f in existing_data:
-            results.append(existing_data[f])
+            # existing_data[f] = extract_raw_features(f) # 再解析する場合
+            pass
         else:
             # 新規解析
             data = extract_raw_features(f)
             if data is not None:
-                results.append(data)
+                existing_data[f] = data
+                new_count += 1
                 
         if (i + 1) % 100 == 0:
             print(f"処理状況: {i + 1}/{len(files)}")
             
-    print(f"保存中: {output_file} (データ数: {len(results)})")
-    joblib.dump(results, output_file)
+    # 全データをリスト化して保存
+    final_results = list(existing_data.values())
+    print(f"保存中: {output_file} (総データ数: {len(final_results)}, 新規追加: {new_count})")
+    joblib.dump(final_results, output_file)
     print("完了。")
 
 if __name__ == "__main__":
