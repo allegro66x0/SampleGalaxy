@@ -15,6 +15,7 @@ class AudioEngine(QObject):
         # Polyphonic Scrubbing Pool
         self.pool_size = pool_size
         self.scrub_pool = []
+        self.scrub_outputs = [] # Keep references to prevent GC
         self.pool_index = 0
         
         for _ in range(self.pool_size):
@@ -23,6 +24,7 @@ class AudioEngine(QObject):
             p.setAudioOutput(o)
             o.setVolume(0.8)
             self.scrub_pool.append(p)
+            self.scrub_outputs.append(o)
 
     def get_main_player(self):
         return self.main_player
