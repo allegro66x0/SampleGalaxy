@@ -1,0 +1,7 @@
+PyQt6
+pyqtgraph
+librosa
+scikit-learn
+soundfile
+numpy
+joblib

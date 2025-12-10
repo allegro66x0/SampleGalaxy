@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# Project Specific (User Data)
+database.json
+raw_features.pkl
+*.wav
+*.mp3
+*.aif
+*.aiff
+# Allow dummy generator script but not the generated dummy folder if it exists
+# (Assuming user might run generate_dummy_wavs.py)
+dummy_waves/
+
+# OS specific
+.DS_Store
+Thumbs.db
