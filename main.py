@@ -62,6 +62,10 @@ class GalaxyPlotWidget(pg.PlotWidget):
         self.filter_oneshot = False
         self.visible_categories = set() # 表示するカテゴリのセット (空なら全て表示、または初期化時に設定)
         
+        # 検索用キャッシュ (表示されている点のみ)
+        self.visible_points_data = [] # 表示中のメタデータリスト
+        self.visible_coords_cache = None # 表示中の座標Numpy配列 (N, 2)
+
         # カテゴリ別カラーパレット (初期化時に定義)
         self.category_colors = {
             "KICK": (220, 20, 60),      # Crimson (赤)
@@ -90,12 +94,19 @@ class GalaxyPlotWidget(pg.PlotWidget):
         self.player.setAudioOutput(self.audio_output)
         self.audio_output.setVolume(0.8)
         
-        # クリックイベントの接続
-        self.scatter.sigClicked.connect(self.on_point_clicked)
+        # クリックイベントの接続 (Scene全体)
+        # 散布図アイテムのクリック(sigClicked)は範囲が狭いため、
+        # Sceneのクリックイベントを拾って最近傍探索を行う (Smart Click)
+        self.scene().sigMouseClicked.connect(self.on_scene_clicked)
+        # self.scatter.sigClicked.connect(self.on_point_clicked) # 旧方式は無効化
         
         # ドラッグ＆ドロップの状態管理
         self.drag_start_pos = None
         self.current_hovered_point = None
+        self.last_played_path = None # スクラビング再生の重複防止用
+        
+        # キー入力のためのフォーカス設定
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def load_data(self, json_path):
         if not os.path.exists(json_path):
@@ -107,7 +118,7 @@ class GalaxyPlotWidget(pg.PlotWidget):
             
         self.points_data = data
         
-        # 座標配列を作成 (高速検索用)
+        # 全データの座標配列 (Jump機能などで使用)
         self.coords_array = np.array([[item['x'], item['y']] for item in data])
         
         self.update_plot()
@@ -115,6 +126,10 @@ class GalaxyPlotWidget(pg.PlotWidget):
     def update_plot(self):
         self.scatter.clear()
         spots = []
+        
+        # キャッシュのリセット
+        self.visible_points_data = []
+        visible_coords_list = []
         
         # フォールバック用パレット
         cluster_palette = [
@@ -164,26 +179,77 @@ class GalaxyPlotWidget(pg.PlotWidget):
                 'size': size
             })
             
+            # 検索用キャッシュに追加
+            self.visible_points_data.append(item)
+            visible_coords_list.append([item['x'], item['y']])
+            
         self.scatter.addPoints(spots)
         
-    def on_point_clicked(self, plot, points):
-        if len(points) > 0:
-            point = points[0]
-            file_path = point.data()
+        # Numpy配列化
+        if visible_coords_list:
+            self.visible_coords_cache = np.array(visible_coords_list)
+        else:
+            self.visible_coords_cache = None
+
+    def find_nearest_point(self, scene_pos, threshold=20):
+        """
+        指定されたシーン座標に最も近い点を探す
+        threshold: 判定距離 (ピクセル単位)
+        戻り値: (file_path, data_pos, distance) or None
+        """
+        if self.visible_coords_cache is None or len(self.visible_coords_cache) == 0:
+            return None
+
+        # 1. マウス位置 (Scene) をデータ座標 (View) に変換
+        mouse_point = self.plotItem.vb.mapSceneToView(scene_pos)
+        mouse_arr = np.array([mouse_point.x(), mouse_point.y()])
+        
+        # 2. データ空間での最近傍探索 (高速)
+        dists = np.linalg.norm(self.visible_coords_cache - mouse_arr, axis=1)
+        min_idx = np.argmin(dists)
+        
+        # 3. 画面上の距離 (Pixel) で判定
+        nearest_data_pos = QPointF(self.visible_coords_cache[min_idx][0], self.visible_coords_cache[min_idx][1])
+        nearest_scene_pos = self.plotItem.vb.mapViewToScene(nearest_data_pos)
+        
+        pixel_dist = (nearest_scene_pos - scene_pos).manhattanLength()
+        
+        if pixel_dist < threshold:
+            target_item = self.visible_points_data[min_idx]
+            return target_item['path'], nearest_data_pos, pixel_dist
             
+        return None
+
+    def on_scene_clicked(self, event):
+        """
+        スマートクリック判定 (Nearest Neighbor Search)
+        """
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+            
+        scene_pos = event.scenePos()
+        result = self.find_nearest_point(scene_pos)
+        
+        if result:
+            file_path, data_pos, _ = result
+            
+            # 再生済み更新
+            self.last_played_path = file_path
+
             # 履歴と表示を更新
-            pos = point.pos()
-            self.update_history(pos)
+            self.update_history(data_pos)
             
-            # データからstart_timeを取得
+            # データからstart_timeを取得 (キャッシュから)
+            # visible_points_dataの中から探しても良いが、パスで特定済み
             start_time = 0
-            for item in self.points_data:
-                if item['path'] == file_path:
-                    start_time = item.get('start_time', 0)
-                    break
-            
+            # 高速化のために points_data を走査するのは避ける (visible_points_dataにあるはず)
+            # find_nearest_point で target_item を返せばいいが、リファクタリングの影響範囲を抑える
+            # ここではシンプルに再検索 (許容範囲)
+            target_item = next((item for item in self.visible_points_data if item['path'] == file_path), None)
+            if target_item:
+                start_time = target_item.get('start_time', 0)
+                
             self.play_audio(file_path, start_time)
-            self.current_hovered_point = point
 
     def update_history(self, pos):
         x, y = pos.x(), pos.y()
@@ -230,9 +296,6 @@ class GalaxyPlotWidget(pg.PlotWidget):
         self.player.play()
         print(f"再生中: {file_path} (Start: {start_time:.2f}s)")
         
-    def get_player(self):
-        return self.player
-
     def set_filter_oneshot(self, enabled):
         self.filter_oneshot = enabled
         self.update_plot()
@@ -275,11 +338,15 @@ class GalaxyPlotWidget(pg.PlotWidget):
             return
             
         try:
-            scene_pos = self.mapToScene(ev.pos())
-            item_pos = self.scatter.mapFromScene(scene_pos)
-            points = self.scatter.pointsAt(item_pos)
-            if len(points) > 0:
-                self.start_drag(points[0].data())
+            # ドラッグ開始位置周辺の点を探す
+            scene_pos = self.mapToScene(self.drag_start_pos)
+            # 判定範囲を少し広めにする (ドラッグのしやすさ重視)
+            result = self.find_nearest_point(scene_pos, threshold=30)
+            
+            if result:
+                file_path, _, _ = result
+                self.start_drag(file_path)
+                
         except Exception as e:
             print(f"Drag detection error: {e}")
         
@@ -293,6 +360,9 @@ class GalaxyPlotWidget(pg.PlotWidget):
         mime_data.setUrls([url])
         drag.setMimeData(mime_data)
         drag.exec(Qt.DropAction.CopyAction)
+
+    def get_player(self):
+        return self.player
 
 class MainWindow(QMainWindow):
     def __init__(self):
