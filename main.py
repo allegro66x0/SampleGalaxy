@@ -317,16 +317,62 @@ class GalaxyPlotWidget(pg.PlotWidget):
             self.visible_categories.clear()
         self.update_plot()
 
+    def keyPressEvent(self, ev):
+        if ev.key() == Qt.Key.Key_Space:
+            self.jump_to_random_neighbor()
+        else:
+            super().keyPressEvent(ev)
+
     def mousePressEvent(self, ev):
+        # フォーカスを取得してキー入力を受け取れるようにする
+        self.setFocus()
+        
         if ev.button() == Qt.MouseButton.LeftButton:
             self.drag_start_pos = ev.pos()
         elif ev.button() == Qt.MouseButton.RightButton:
-            self.jump_to_random_neighbor()
+            # 右クリックはスクラビングの開始だが、クリック時点でも再生したい
+            # ただし、mouseMoveEventで処理されるのでここではacceptのみでも良いが、
+            # 即座に音が出てほしい場合はここで判定してもよい。
+            # 今回は「動きながら」がメインだが、開始点でも鳴らす
+            try:
+                scene_pos = self.mapToScene(ev.pos())
+                result = self.find_nearest_point(scene_pos, threshold=30)
+                if result:
+                    file_path, data_pos, _ = result
+                    self.last_played_path = file_path
+                    self.update_history(data_pos)
+                    target_item = next((item for item in self.visible_points_data if item['path'] == file_path), None)
+                    if target_item:
+                        self.play_audio(file_path, target_item.get('start_time', 0))
+            except Exception as e:
+                print(f"Right click error: {e}")
             ev.accept()
             return
         super().mousePressEvent(ev)
 
     def mouseMoveEvent(self, ev):
+        # 右ドラッグ（スクラビング再生）
+        if ev.buttons() & Qt.MouseButton.RightButton:
+            try:
+                scene_pos = self.mapToScene(ev.pos())
+                result = self.find_nearest_point(scene_pos, threshold=30) # 少し広め
+                
+                if result:
+                    file_path, data_pos, _ = result
+                    
+                    # 連続再生防止 (前回と同じなら再生しない)
+                    if file_path != self.last_played_path:
+                        self.last_played_path = file_path
+                        self.update_history(data_pos)
+                        
+                        target_item = next((item for item in self.visible_points_data if item['path'] == file_path), None)
+                        if target_item:
+                            self.play_audio(file_path, target_item.get('start_time', 0))
+            except Exception as e:
+                print(f"Scrubbing error: {e}")
+            return
+
+        # 左ドラッグ（DAWへのドロップ）
         if not (ev.buttons() & Qt.MouseButton.LeftButton):
             super().mouseMoveEvent(ev)
             return
