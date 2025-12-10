@@ -522,7 +522,8 @@ class GalaxyPlotWidget(pg.PlotWidget):
                     self.update_history(data_pos)
                     target_item = next((item for item in self.visible_points_data if item['path'] == file_path), None)
                     if target_item:
-                        # 右クリック開始時はポリフォニックで鳴らすか？ -> どちらでも良いが、スクラビングの一環ならTrue
+                        # ヒット中はタイマーを止める（再生維持）
+                        self.scrub_stop_timer.stop()
                         self.play_audio(file_path, target_item.get('start_time', 0), polyphonic=True)
             except Exception as e:
                 print(f"Right click error: {e}")
@@ -532,7 +533,7 @@ class GalaxyPlotWidget(pg.PlotWidget):
         
     def mouseReleaseEvent(self, ev):
         if ev.button() == Qt.MouseButton.RightButton:
-            # 右クリック離したら即停止 (あるいはタイマーに任せる？通常は離したら即停止が自然)
+            # 右クリック離したら即停止
             self.stop_all_scrubbing()
         super().mouseReleaseEvent(ev)
 
@@ -541,26 +542,29 @@ class GalaxyPlotWidget(pg.PlotWidget):
         if ev.buttons() & Qt.MouseButton.RightButton:
             try:
                 scene_pos = self.mapToScene(ev.pos())
-                result = self.find_nearest_point(scene_pos, threshold=30) # 少し広め
+                # 判定範囲を少し広めにする
+                result = self.find_nearest_point(scene_pos, threshold=30) 
                 
                 if result:
+                    # エリア内: タイマー停止（安全地帯）
+                    self.scrub_stop_timer.stop()
+                    
                     file_path, data_pos, _ = result
                     
                     # 連続再生防止 (前回と同じなら再生しない)
                     if file_path != self.last_played_path:
-                        
-                        # スロットリング除去 -> ポリフォニック再生により「音が重なってもOK」＆「前の音を消さない」を実現
-                        
                         self.last_played_path = file_path
-                        # self.last_play_time = now # 不要
-                        
                         self.update_history(data_pos)
                         
                         target_item = next((item for item in self.visible_points_data if item['path'] == file_path), None)
                         if target_item:
                             self.play_audio(file_path, target_item.get('start_time', 0), polyphonic=True)
-                            # Watchdogタイマーをリセット (150ms後に停止)
-                            self.scrub_stop_timer.start(150)
+                else:
+                    # エリア外: カウントダウン開始
+                    # まだ停止タイマーが動いていなければ開始（動き続けている限りタイマーをリセットしない＝出た瞬間から0.4秒）
+                    if not self.scrub_stop_timer.isActive():
+                        self.scrub_stop_timer.start(400) # 0.4s
+                        
             except Exception as e:
                 print(f"Scrubbing error: {e}")
             return
