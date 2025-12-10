@@ -156,6 +156,11 @@ class GalaxyPlotWidget(pg.PlotWidget):
         self.scene().sigMouseClicked.connect(self.on_scene_clicked)
         # self.scatter.sigClicked.connect(self.on_point_clicked) # 旧方式は無効化
         
+        # 初期背景などの設定 (枠線を消す)
+        self.getPlotItem().hideAxis('bottom')
+        self.getPlotItem().hideAxis('left')
+        self.getPlotItem().getViewBox().setAspectLocked(True)
+        
         # ドラッグ＆ドロップの状態管理
         self.drag_start_pos = None
         self.current_hovered_point = None
@@ -165,11 +170,16 @@ class GalaxyPlotWidget(pg.PlotWidget):
         # キー入力のためのフォーカス設定
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
+    def _normalize_path(self, path):
+        # パス区切り文字を統一
+        return os.path.normpath(path)
+
     def load_favorites(self):
         if os.path.exists(self.favorites_file):
             try:
                 with open(self.favorites_file, 'r', encoding='utf-8') as f:
-                    self.favorites = set(json.load(f))
+                    raw_favs = json.load(f)
+                    self.favorites = {self._normalize_path(p) for p in raw_favs}
             except Exception as e:
                 print(f"Failed to load favorites: {e}")
                 self.favorites = set()
@@ -177,11 +187,13 @@ class GalaxyPlotWidget(pg.PlotWidget):
     def save_favorites(self):
         try:
             with open(self.favorites_file, 'w', encoding='utf-8') as f:
+                # 保存時も一応正規化しておくか、そのまま出すか。リストにして保存。
                 json.dump(list(self.favorites), f, indent=4)
         except Exception as e:
             print(f"Failed to save favorites: {e}")
 
     def add_favorite(self, path):
+        path = self._normalize_path(path)
         if path not in self.favorites:
             self.favorites.add(path)
             print(f"Added to favorites: {path}")
@@ -190,6 +202,7 @@ class GalaxyPlotWidget(pg.PlotWidget):
             self.favorites_changed.emit()
 
     def remove_favorite(self, path):
+        path = self._normalize_path(path)
         if path in self.favorites:
             self.favorites.remove(path)
             print(f"Removed from favorites: {path}")
@@ -227,6 +240,11 @@ class GalaxyPlotWidget(pg.PlotWidget):
             data = json.load(f)
             
         self.points_data = data
+        
+        # パスの正規化 (Windows/Mac互換性確保)
+        for item in self.points_data:
+            if 'path' in item:
+                item['path'] = self._normalize_path(item['path'])
         
         # 全データの座標配列 (Jump機能などで使用)
         self.coords_array = np.array([[item['x'], item['y']] for item in data])
@@ -408,6 +426,20 @@ class GalaxyPlotWidget(pg.PlotWidget):
                 start_time = target_item.get('start_time', 0)
                 
             self.play_audio(file_path, start_time)
+
+    def select_point(self, path):
+        path = self._normalize_path(path)
+        # points_dataから検索 (表示/非表示に関わらず)
+        target_item = next((d for d in self.points_data if d['path'] == path), None)
+        
+        if target_item:
+            self.last_played_path = path
+            # マーカー移動
+            self.update_history(QPointF(target_item['x'], target_item['y']))
+            # 再生
+            self.play_audio(path, target_item.get('start_time', 0))
+        else:
+            print(f"File not found in database: {path}")
 
     def update_history(self, pos):
         x, y = pos.x(), pos.y()
@@ -817,9 +849,8 @@ class MainWindow(QMainWindow):
     def on_fav_item_clicked(self, item):
         path = item.data(Qt.ItemDataRole.UserRole)
         # 該当するファイルの座標を探してジャンプ＆再生
-        target_item = next((d for d in self.plot_widget.points_data if d['path'] == path), None)
-        if target_item:
-            self.plot_widget.play_audio(path, target_item.get('start_time', 0))
+        # select_pointメソッドで処理 (左クリック状態にする)
+        self.plot_widget.select_point(path)
             # 座標を中心に移動できればベストだが、今回はとりあえず再生のみ
             # 必要なら zoom を調整するコードなどを追加
         
