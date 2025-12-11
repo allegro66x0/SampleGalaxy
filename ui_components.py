@@ -115,18 +115,18 @@ class GalaxyPlotWidget(pg.PlotWidget):
         self.visible_indices = None # Indices of currently visible points relative to full data
         
         self.category_colors = {
-            "KICK": (220, 20, 60),      # Crimson
-            "SNARE": (255, 140, 0),     # DarkOrange
-            "CLAP": (255, 69, 0),       # OrangeRed
-            "HIHAT": (0, 255, 255),     # Cyan
-            "CRASH": (70, 130, 180),    # SteelBlue
-            "TOM": (139, 69, 19),       # SaddleBrown
-            "BASS": (138, 43, 226),     # BlueViolet
-            "GUITAR": (255, 215, 0),    # Gold
-            "PIANO": (50, 205, 50),     # LimeGreen
-            "LOOP": (0, 100, 0),        # DarkGreen
-            "FX": (30, 144, 255),       # DodgerBlue
-            "UNKNOWN": (128, 128, 128)  # Gray
+            "KICK": (255, 0, 50),       # Vivi Crimson
+            "SNARE": (255, 100, 0),     # Vivid Orange
+            "CLAP": (255, 50, 0),       # Vivid OrangeRed
+            "HIHAT": (0, 255, 255),     # Cyan (Max Sat)
+            "CRASH": (0, 150, 255),     # Vivid Blue
+            "TOM": (160, 80, 20),       # Brownish
+            "BASS": (150, 30, 255),     # Violet
+            "GUITAR": (255, 230, 0),    # Vivid Gold
+            "PIANO": (0, 255, 100),     # Vivid Green
+            "LOOP": (0, 180, 0),        # Green
+            "FX": (0, 120, 255),        # Blue
+            "UNKNOWN": (100, 100, 100)  # Gray
         }
         self.visible_categories = set(self.category_colors.keys())
         self.visible_categories.add("TOP_LOOP")
@@ -261,7 +261,7 @@ class GalaxyPlotWidget(pg.PlotWidget):
         cluster_palette = [(100, 100, 100), (150, 150, 150), (200, 200, 200)]
         # Map categories to colors
         cat_color_map = self.category_colors.copy()
-        cat_color_map.update({"TOP_LOOP": (0, 128, 0), "PERC": (255, 105, 180), "OTHER": (180, 180, 180)})
+        cat_color_map.update({"TOP_LOOP": (0, 180, 0), "PERC": (255, 50, 150), "OTHER": (180, 180, 180)})
         
         # Pre-calc centroid range
         centroids = [d.get('centroid', 0) for d in data if 'centroid' in d]
@@ -295,9 +295,9 @@ class GalaxyPlotWidget(pg.PlotWidget):
                 val = item['centroid']
                 norm = (val - min_c) / (max_c - min_c)
                 norm = max(0.0, min(1.0, norm))
-                # Green to Yellow-Green
-                r = int(0 + norm * 180)
-                g = int(80 + norm * 175)
+                # Green to Yellow-Green (More vivid)
+                r = int(0 + norm * 255)
+                g = int(100 + norm * 155)
                 b = int(0 + norm * 50)
                 c = (r, g, b)
             elif cat in cat_color_map:
@@ -385,6 +385,7 @@ class GalaxyPlotWidget(pg.PlotWidget):
             pos=vis_pos,
             size=vis_sizes,
             brush=vis_colors,
+            pen=None,  # No border
             symbol='o' # vectorizing symbols supported? Yes, but usually single symbol is faster. Favs are 'star' in old code. 
             # Supporting different symbols in one setData requires 'symbol' array.
             # 'o' vs 'star'.
