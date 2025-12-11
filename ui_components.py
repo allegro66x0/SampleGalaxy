@@ -43,8 +43,16 @@ class GalaxyPlotWidget(pg.PlotWidget):
         self.setBackground('k')
         self.hideAxis('left')
         self.hideAxis('bottom')
+        self.hideAxis('bottom')
         self.setMouseEnabled(x=True, y=True)
         self.setMenuEnabled(False)
+        
+        # Experimental: GPU Acceleration
+        try:
+            self.useOpenGL(True)
+            print("OpenGL acceleration enabled")
+        except Exception as e:
+            print(f"Failed to enable OpenGL: {e}")
         
         # Audio Engine
         self.audio_engine = AudioEngine()
